@@ -2,9 +2,6 @@ import Lean
 
 open Lean Elab
 
-set_option pp.all true
-
-
 
 def getTacticSubstring (tInfo : TacticInfo) : Option Substring :=
   match tInfo.stx.getSubstring? with
@@ -289,6 +286,12 @@ structure Result where
   steps : List ProofStep
   allGoals : Std.HashSet GoalInfo
 
+instance : ToJson Result where
+  toJson r := Json.mkObj [
+    ("steps", toJson r.steps),
+    ("allGoals", toJson (r.allGoals.toList))
+  ]
+
 def getGoalsChange (ctx : ContextInfo) (tInfo : TacticInfo) : MetaM (List (List String × GoalInfo × List GoalInfo)) := do
   -- We want to filter out `focus` like tactics which don't do any assignments
   -- therefore we check all goals on whether they were assigned during the tactic
@@ -366,7 +369,7 @@ partial def parseTacticInfo (infoTree: InfoTree) (ctx : ContextInfo) (info : Inf
   let orphanedGoals := currentGoals.foldl Std.HashSet.erase (noInEdgeGoals allGoals steps)
     |>.toArray.insertionSort (nameNumLt ·.id.name ·.id.name) |>.toList
 
-  let theorems ← if isSingleTacticMode then GetTheoremsq infoTree tInfo ctx else pure []
+  let theorems ←  GetTheoremsq infoTree tInfo ctx  -- FOR STATIC VERSION, WE DELETE "IF SINGLETACTIC MODE"
   let newSteps := proofTreeEdges.filterMap fun ⟨ tacticDependsOn, goalBefore, goalsAfter ⟩ =>
     -- Leave only steps which are not handled in the subtree.
     if steps.map (·.goalBefore) |>.elem goalBefore then
@@ -408,21 +411,23 @@ partial def BetterParser (infoTree : InfoTree) := infoTree.visitM (postNode :=
 
 
 
-open Lean.Elab
 
 structure Config where
   file_path : System.FilePath := "."
   const_name : Lean.Name := `Unknown
+  output_path : System.FilePath := "."
 
 
 def parseArgs (args : Array String) : IO Config := do
-  if args.size < 2 then
-    throw <| IO.userError "usage:lean exe goaltree FILE_PATH CONST_NAME"
+  if args.size < 3 then
+    throw <| IO.userError "usage:lean exe goaltree FILE_PATH CONST_NAME OUTPUT_FILE_PATH"
   let mut cfg : Config := {}
   cfg := { cfg with file_path := ⟨args[0]!⟩ }
   cfg := { cfg with const_name := args[1]!.toName }
+  cfg := { cfg with output_path := ⟨args[2]!⟩ }
   IO.println (s!"File:{cfg.file_path}")
   IO.println (s!"Constant:{cfg.const_name}")
+  IO.println (s!"Output:{cfg.output_path}")
 
   return cfg
 
@@ -444,17 +449,9 @@ unsafe def processCommands : Frontend.FrontendM (List (Lean.Environment × InfoS
 
 
 ------------------------------------------------------------------
---输出到命令行部分，定义printresult(r:Result):IO Unit
+--Codes for printing and saving to Json, use printresult (r:Result) : IO Unit
 
 
-
-
--- unsafe def printresult (rr : Result) : IO Unit :=do
---   let mut stepNumber := 1
---   for step in rr.steps do
---     IO.println s!"\n=== step {stepNumber} ==="
---     IO.println s!"Tactic: {step.tacticString}"
---     stepNumber := stepNumber + 1
 def writeGoalInfo (goal : GoalInfo) : IO Unit := do
   IO.println s!"Goal: {goal.type}"
   if goal.hyps.isEmpty then
@@ -468,10 +465,7 @@ def writeGoalInfo (goal : GoalInfo) : IO Unit := do
 def writeProofStep (step : ProofStep) (stepNumber : Nat) : IO Unit := do
   IO.println s!"\n=== Step {stepNumber} ==="
   IO.println s!"Tactic: {step.tacticString}"
-
   IO.println s!"\nGoals Before:{step.goalBefore.type}"
-  --writeGoalInfo step.goalBefore
-
   if step.goalsAfter.isEmpty then
     IO.println "\nGoals After: No goals (proof completed)"
   else
@@ -479,22 +473,18 @@ def writeProofStep (step : ProofStep) (stepNumber : Nat) : IO Unit := do
     for (i, goal) in step.goalsAfter.enum do
       IO.println s!"Goal {i + 1}:"
       writeGoalInfo goal
-
   if !step.spawnedGoals.isEmpty then
     IO.println s!"Spawned goals: {step.spawnedGoals.length}"
     for (i, goal) in step.spawnedGoals.enum do
       IO.println s!"Spawned goal {i + 1}:"
       writeGoalInfo goal
 
-  -- if !step.tacticDependsOn.isEmpty then
-  --   IO.println s!"Depends on: {step.tacticDependsOn}"
+def saveResultToFile (r : Result) (filePath : System.FilePath) : IO Unit := do
+  let json := toJson r
+  let jsonStr := Json.pretty json
+  IO.FS.writeFile filePath jsonStr
 
-  -- if !step.theorems.isEmpty then
-  --   IO.println s!"Theorems used: {step.theorems.length}"
-  --   for thm in step.theorems do
-  --     IO.println s!"  {thm}"
-
-def printresult (r : Result) : IO Unit := do
+def printresult (r : Result)(filePath : System.FilePath) : IO Unit := do
   IO.println "Proof Tree:"
   IO.println "==========="
 
@@ -515,6 +505,8 @@ def printresult (r : Result) : IO Unit := do
     IO.println "\nAll unique goals encountered:"
     for goal in r.allGoals.toList do
       IO.println s!"- {goal.username} : {goal.type}"
+
+  saveResultToFile r filePath
 
 
 
@@ -561,7 +553,6 @@ unsafe def main (args : List String) : IO Unit := do
         let ioComputation := ((BetterParser tree).run {} {}).toIO ctx state
         let ((result, _), _) ← ioComputation
         match result with
-        | some r => printresult r
+        | some r => printresult r config.output_path
         | none => IO.println "Error"
-
       break
