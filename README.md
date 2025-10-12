@@ -2,7 +2,7 @@
 Get the crucial Goal Tree structure for Lean code. A static version of Paper-Proof.
 
 
-Just put it in your project repository. In your `lakefile.toml`, add:
+Just put it in your project repository. Rename it to `goaltree.lean`. In your `lakefile.toml`, add:
 ```bash
 [[lean_exe]]
 name = "goaltree"
