@@ -1,5 +1,4 @@
 import Lean
-import Lean.Server.InfoUtils
 
 open Lean Elab
 
