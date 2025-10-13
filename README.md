@@ -12,8 +12,7 @@ supportInterpreter = true
 name = "metalib"
 git = "https://github.com/reaslab/metalib.git"
 rev = "main"
-``` .
-
+```
 Then use
 ```bash
 lake clean
