@@ -1,6 +1,62 @@
 import Lean
+import Metalib.Info
 
-open Lean Elab
+--Augmented Version : CAN extract theorems used by `simp`
+--Using codes from Jixia by kokic
+
+open Lean Elab Meta Command Tactic
+
+
+def getSimpStats (stx : Syntax) : TacticM Simp.Stats := withMainContext do
+  let { ctx, simprocs, dischargeWrapper, simpArgs } ← mkSimpContext stx (eraseLocal := false)
+  dischargeWrapper.with fun discharge? =>
+    simpLocation ctx simprocs discharge? (expandOptLocation stx[5])
+
+def getSimpAllStats (stx : Syntax) : TacticM Simp.Stats := withMainContext do
+  let { ctx, simprocs, .. } ← mkSimpContext stx (eraseLocal := true) (kind := .simpAll) (ignoreStarArg := true)
+  let (_, stats) ← simpAll (← getMainGoal) ctx (simprocs := simprocs)
+  return stats
+
+def getDSimpStats (stx : Syntax) : TacticM Simp.Stats := withMainContext do
+  let { ctx, simprocs, .. } ← mkSimpContext stx (eraseLocal := false) (kind := .dsimp)
+  let loc := expandOptLocation stx[5]
+  let (fvarIds, simplifyTarget) ← match loc with
+  | Location.targets hyps simplifyTarget => do
+      let fvarIds ← getFVarIds hyps
+      pure (fvarIds, simplifyTarget)
+  | Location.wildcard => do
+      pure (← (← getMainGoal).getNondepPropHyps, true)
+  let (_, stats) ← dsimpGoal (← getMainGoal) ctx (simprocs := simprocs) simplifyTarget fvarIds
+  return stats
+
+def getStats (stx : Syntax) : TacticM Simp.Stats :=
+  match stx.getKind with
+  | ``Parser.Tactic.simpAll => getSimpAllStats stx
+  | ``Parser.Tactic.dsimp => getDSimpStats stx
+  | _ => getSimpStats stx
+
+def _root_.Lean.Meta.Origin.getName {m : Type → Type} [Monad m] [MonadLCtx m] : Origin → m Name
+  | .decl declName _ _ => pure declName
+  | .fvar fvarId => do return (← getLCtx).get! fvarId |>.userName
+  | .stx id _ => pure id
+  | .other name => pure name
+
+def getUsedTheorems (ci : ContextInfo) (ti : TacticInfo) : IO Json := do
+    if ti.stx.isOfKind |> List.any [
+      ``Parser.Tactic.simp,
+      ``Parser.Tactic.simpAll,
+      ``Parser.Tactic.dsimp,
+    ] then
+      let usedTheorems ← TacticM.runWithInfoBefore ci ti <| withMainContext do
+        let simpStats ← getStats ti.stx
+        simpStats.usedTheorems.toArray.foldlM (init := #[]) fun a k _ => do return a.push (← k.getName)
+      return json% {
+        usedTheorems: $(usedTheorems)
+      }
+    else
+      return .null
+
+
 
 
 def getTacticSubstring (tInfo : TacticInfo) : Option Substring :=
@@ -127,28 +183,40 @@ def extractTheoremName (expr : Expr) (lctx : LocalContext) : Option Name := do
   | _ => none
 
 /-- Extract theorem names exactly like Lean's hover does - using built-in hover functionality -/
-def findTheoremsLikeHover (tree : Elab.InfoTree) (tacticStartPos tacticStopPos : String.Pos) (ctx : ContextInfo) (goalDecl : MetavarDecl) : MetaM (List TheoremSignature) := do
+def findTheoremsLikeHover (tree : Elab.InfoTree) (tacticStartPos tacticStopPos : String.Pos) (ctx : ContextInfo) (goalDecl : MetavarDecl) (ti: TacticInfo): MetaM (List TheoremSignature) := do
   let mut theoremNames : NameSet := {}
 
-  -- Sample positions throughout the tactic range (every few characters)
-  -- This ensures we catch all identifiers that would show on hover
-  let mut currentPos := tacticStartPos
-  let step : String.Pos := ⟨3⟩  -- Check every 3 characters
+  -- For `simp`,`dsimp`,etc. We use codes from Jixia to extract the used theorems.
+  if ti.stx.isOfKind |> List.any [
+      ``Parser.Tactic.simp,
+      ``Parser.Tactic.simpAll,
+      ``Parser.Tactic.dsimp,
+  ] then
+    let usedTheorems ← TacticM.runWithInfoBefore ctx ti <| withMainContext do
+      let simpStats ← getStats ti.stx
+      simpStats.usedTheorems.toArray.foldlM (init := #[]) fun a k _ => do return a.push (← k.getName)
+    for name in usedTheorems do
+      theoremNames := theoremNames.insert name
+  else
+    -- Sample positions throughout the tactic range (every few characters)
+    -- This ensures we catch all identifiers that would show on hover
+    let mut currentPos := tacticStartPos
+    let step : String.Pos := ⟨3⟩  -- Check every 3 characters
 
-  while currentPos < tacticStopPos do
-    -- Use Lean's actual hover function to find what would show at this position
-    if let some infoWithCtx := tree.hoverableInfoAtM? currentPos then
-      -- Extract theorem name from the hover info
-      match infoWithCtx with
-      | some infoWithCtx =>
-        match infoWithCtx.info with
-        | .ofTermInfo termInfo =>
-          if let some name := extractTheoremName termInfo.expr termInfo.lctx then
-            theoremNames := theoremNames.insert name
-        | _ => pure ()
-      | none => pure ()
+    while currentPos < tacticStopPos do
+      -- Use Lean's actual hover function to find what would show at this position
+      if let some infoWithCtx := tree.hoverableInfoAtM? currentPos then
+        -- Extract theorem name from the hover info
+        match infoWithCtx with
+        | some infoWithCtx =>
+          match infoWithCtx.info with
+          | .ofTermInfo termInfo =>
+            if let some name := extractTheoremName termInfo.expr termInfo.lctx then
+              theoremNames := theoremNames.insert name
+          | _ => pure ()
+        | none => pure ()
 
-    currentPos := currentPos + step
+      currentPos := currentPos + step
 
   -- Process each theorem name and filter for relevant declarations
   let theoremSignatures ← theoremNames.toList.filterMapM fun name => do
@@ -158,14 +226,14 @@ def findTheoremsLikeHover (tree : Elab.InfoTree) (tacticStartPos tacticStopPos :
   pure theoremSignatures
 
 
-def GetTheoremsq (infoTree : InfoTree) (tacticInfo : TacticInfo) (ctx : ContextInfo) : MetaM (List TheoremSignature) := do
+def GetTheorems (infoTree : InfoTree) (tacticInfo : TacticInfo) (ctx : ContextInfo) : MetaM (List TheoremSignature) := do
   let some goalDecl := ctx.mctx.findDecl? tacticInfo.goalsBefore.head!
     | throwError "error"
   let some tacticSubstring := getTacticSubstring tacticInfo
     | throwError "error"
 
   ctx.runMetaM goalDecl.lctx do
-    findTheoremsLikeHover infoTree tacticSubstring.startPos tacticSubstring.stopPos ctx goalDecl
+    findTheoremsLikeHover infoTree tacticSubstring.startPos tacticSubstring.stopPos ctx goalDecl tacticInfo
 
 
 
@@ -174,7 +242,7 @@ def GetTheoremsq (infoTree : InfoTree) (tacticInfo : TacticInfo) (ctx : ContextI
 
 
 
-structure Hypothesis where
+structure Hypothesis_pp where
   username : String
   type : String
   value : Option String
@@ -186,7 +254,7 @@ structure Hypothesis where
 structure GoalInfo where
   username : String
   type : String
-  hyps : List Hypothesis
+  hyps : List Hypothesis_pp
   -- unique identifier for the goal, mvarId
   id : MVarId
   deriving Inhabited, ToJson, FromJson
@@ -268,7 +336,7 @@ def printGoalInfo (printCtx : ContextInfo) (id : MVarId) : MetaM GoalInfo := do
       value    := value.map (·.fmt.pretty),
       id       := hypDecl.fvarId.name.toString,
       isProof  := isProof
-    } : Hypothesis) :: acc)
+    } : Hypothesis_pp) :: acc)
   return {
     username := decl.userName.toString
     type     := (← ppExprWithInfos ppContext decl.type).fmt.pretty
@@ -372,7 +440,7 @@ partial def parseTacticInfo (infoTree: InfoTree) (ctx : ContextInfo) (info : Inf
   let orphanedGoals := currentGoals.foldl Std.HashSet.erase (noInEdgeGoals allGoals steps)
     |>.toArray.insertionSort (nameNumLt ·.id.name ·.id.name) |>.toList
 
-  let theorems ←  GetTheoremsq infoTree tInfo ctx  -- FOR STATIC VERSION, WE DELETE "IF SINGLETACTIC MODE"
+  let theorems ←  GetTheorems infoTree tInfo ctx  -- FOR STATIC VERSION, WE DELETE "IF SINGLETACTIC MODE"
   let newSteps := proofTreeEdges.filterMap fun ⟨ tacticDependsOn, goalBefore, goalsAfter ⟩ =>
     -- Leave only steps which are not handled in the subtree.
     if steps.map (·.goalBefore) |>.elem goalBefore then
@@ -415,16 +483,16 @@ partial def BetterParser (infoTree : InfoTree) := infoTree.visitM (postNode :=
 
 
 
-structure Config where
+structure Config_pp where
   file_path : System.FilePath := "."
   const_name : Lean.Name := `Unknown
   output_path : System.FilePath := "."
 
 
-def parseArgs (args : Array String) : IO Config := do
+def parseArgs (args : Array String) : IO Config_pp := do
   if args.size < 3 then
     throw <| IO.userError "usage:lean exe goaltree FILE_PATH CONST_NAME OUTPUT_FILE_PATH"
-  let mut cfg : Config := {}
+  let mut cfg : Config_pp := {}
   cfg := { cfg with file_path := ⟨args[0]!⟩ }
   cfg := { cfg with const_name := args[1]!.toName }
   cfg := { cfg with output_path := ⟨args[2]!⟩ }
