@@ -12,7 +12,7 @@ supportInterpreter = true
 name = "metalib"
 git = "https://github.com/reaslab/metalib.git"
 rev = "main"
-```.
+``` .
 
 Then use
 ```bash
@@ -22,4 +22,4 @@ lake exe goaltree LEAN_FILE_PATH CONSTANT_NAME OUTPUT_PATH
 to run.
 
 ____________________________________________
-We use(modify) codes of Paperproof by lakesare, codes of Animate-lean-proofs by dwrensha, codes of Jixia by kokic.
+We use(modify) codes of Paperproof by lakesare, codes of Animate-lean-proofs by dwrensha, and codes of Jixia by kokic.
