@@ -41,20 +41,6 @@ def _root_.Lean.Meta.Origin.getName {m : Type → Type} [Monad m] [MonadLCtx m] 
   | .stx id _ => pure id
   | .other name => pure name
 
-def getUsedTheorems (ci : ContextInfo) (ti : TacticInfo) : IO Json := do
-    if ti.stx.isOfKind |> List.any [
-      ``Parser.Tactic.simp,
-      ``Parser.Tactic.simpAll,
-      ``Parser.Tactic.dsimp,
-    ] then
-      let usedTheorems ← TacticM.runWithInfoBefore ci ti <| withMainContext do
-        let simpStats ← getStats ti.stx
-        simpStats.usedTheorems.toArray.foldlM (init := #[]) fun a k _ => do return a.push (← k.getName)
-      return json% {
-        usedTheorems: $(usedTheorems)
-      }
-    else
-      return .null
 
 
 
@@ -182,10 +168,18 @@ def extractTheoremName (expr : Expr) (lctx : LocalContext) : Option Name := do
     val.getAppFn.consumeMData.constName?
   | _ => none
 
+def ifisTheorem (name : Name) : MetaM Bool := do
+  try
+    let info ← getConstInfo name
+    match info with
+    | ConstantInfo.thmInfo _ => return true
+    | _ => return false
+  catch _ =>
+    return false
+
 /-- Extract theorem names exactly like Lean's hover does - using built-in hover functionality -/
 def findTheoremsLikeHover (tree : Elab.InfoTree) (tacticStartPos tacticStopPos : String.Pos) (ctx : ContextInfo) (goalDecl : MetavarDecl) (ti: TacticInfo): MetaM (List TheoremSignature) := do
   let mut theoremNames : NameSet := {}
-
   -- For `simp`,`dsimp`,etc. We use codes from Jixia to extract the used theorems.
   if ti.stx.isOfKind |> List.any [
       ``Parser.Tactic.simp,
@@ -196,7 +190,8 @@ def findTheoremsLikeHover (tree : Elab.InfoTree) (tacticStartPos tacticStopPos :
       let simpStats ← getStats ti.stx
       simpStats.usedTheorems.toArray.foldlM (init := #[]) fun a k _ => do return a.push (← k.getName)
     for name in usedTheorems do
-      theoremNames := theoremNames.insert name
+      if ← ifisTheorem name then
+        theoremNames := theoremNames.insert name
   else
     -- Sample positions throughout the tactic range (every few characters)
     -- This ensures we catch all identifiers that would show on hover
@@ -429,9 +424,6 @@ partial def parseTacticInfo (infoTree: InfoTree) (ctx : ContextInfo) (info : Inf
   let mut tacticString := if forcedTacticString.length > 0 then forcedTacticString else prettifyTacticString tacticSubstring.toString
 
   let steps := prettifySteps tInfo.stx steps
-
-  --let position ← sorry
-
   let proofTreeEdges ← getGoalsChange ctx tInfo
   let currentGoals := proofTreeEdges.map (fun ⟨ _, g₁, gs ⟩ => g₁ :: gs)  |>.flatten
   let allGoals := allGoals.insertMany $ currentGoals
@@ -541,16 +533,16 @@ def writeProofStep (step : ProofStep) (stepNumber : Nat) : IO Unit := do
     IO.println "\nGoals After: No goals (proof completed)"
   else
     IO.println s!"\nGoals After: {step.goalsAfter.length} goal(s)"
-    let i := 0
+    let mut i := 0
     for goal in step.goalsAfter do
-      let i := i + 1
+      i := i + 1
       IO.println s!"Goal {i}:"
       writeGoalInfo goal
   if !step.spawnedGoals.isEmpty then
     IO.println s!"Spawned goals: {step.spawnedGoals.length}"
-    let i := 0
+    let mut i := 0
     for goal in step.spawnedGoals do
-      let i := i + 1
+      i := i + 1
       IO.println s!"Spawned goal {i}:"
       writeGoalInfo goal
 
