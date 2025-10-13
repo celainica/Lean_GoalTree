@@ -7,6 +7,11 @@ Just put it in your project repository. Rename it to `goaltree.lean`. In your `l
 [[lean_exe]]
 name = "goaltree"
 supportInterpreter = true
+
+[[require]]
+name = "metalib"
+git = "https://github.com/reaslab/metalib.git"
+rev = "main"
 ```.
 
 Then use
@@ -15,3 +20,6 @@ lake clean
 lake exe goaltree LEAN_FILE_PATH CONSTANT_NAME OUTPUT_PATH
 ```
 to run.
+
+____________________________________________
+We use(modify) codes of Paperproof by lakesare, codes of Animate-lean-proofs by dwrensha, codes of Jixia by kokic.
